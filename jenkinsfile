@@ -1,0 +1,118 @@
+node() {
+    
+    def artiServer = Artifactory.server 'artifactory-oss'
+    def rtMaven = Artifactory.newMavenBuild()
+    def buildInfo = Artifactory.newBuildInfo()
+    def descriptor = Artifactory.mavenDescriptor()
+    buildInfo.env.capture = true
+    
+     //sonar
+    def SONAR_HOST_URL = 'http://192.168.250.9:9000'
+    def SONAR_PROJECT_KEY = "guestbook-service-${BUILD_NUMBER}"
+
+    
+    stage('scm') {
+        git 'https://github.com/chengyh2golang/Guestbook-microservices-k8s'
+    }
+    
+    stage('sonarqube') {
+        
+    }
+    
+    stage('maven build') {
+        rtMaven.resolver releaseRepo: 'maven-remote-virtual', snapshotRepo: 'maven-remote-virtual', server: artiServer
+        rtMaven.deployer releaseRepo: 'teamA-maven-dev-local', snapshotRepo: 'teamA-maven-dev-local', server: artiServer
+        rtMaven.deployer.deployArtifacts = false
+        descriptor.setVersion "org.wangqing:Guestbook-microservices-k8s","1.0.$BUILD_NUMBER"
+        descriptor.setVersion "org.wangqing:gateway-service","1.0.$BUILD_NUMBER"
+        descriptor.setVersion "org.wangqing.guestbook-microservices-k8s:discovery-service","1.0.$BUILD_NUMBER"
+        descriptor.setVersion "org.wangqing.guestbook-microservices-k8s:guestbook-service","1.3.$BUILD_NUMBER"
+        descriptor.setVersion "org.wangqing:zipkin-service","1.0.$BUILD_NUMBER"
+        descriptor.transform()
+        rtMaven.tool = 'maven363'
+        rtMaven.run pom: './pom.xml', goals: 'clean install',buildInfo: buildInfo
+    }
+    
+    stage('sonar scan') {
+        withSonarQubeEnv('sonarqube') {
+            sh "/opt/sonar-scanner-4.0.0.1744-linux/bin/sonar-scanner -Dsonar.language=java -Dsonar.projectKey=${SONAR_PROJECT_KEY} -Dsonar.sources=guestbook-service -Dsonar.host.url=${SONAR_HOST_URL} -Dsonar.java.binaries='*' "
+        }
+    }
+    
+    stage('snoar quality gate') {
+        sleep 10
+        def qg = waitForQualityGate() // Reuse taskId previously collected by withSonarQubeEnv
+        if (qg.status != 'OK') {
+            error "Pipeline aborted due to quality gate failure: ${qg.status}"
+        } else {
+            def surl="${SONAR_HOST_URL}/api/measures/component?component=guestbook-service-43&metricKeys=alert_status,quality_gate_details,coverage,new_coverage,bugs,new_bugs,reliability_rating,vulnerabilities,new_vulnerabilities,security_rating,sqale_rating,sqale_index,sqale_debt_ratio,new_sqale_debt_ratio,duplicated_lines_density&additionalFields=metrics,periods"
+            def response=httpRequest consoleLogResponseBody: true, contentType: 'APPLICATION_JSON', ignoreSslErrors: true, url: surl
+            def propssonar = readJSON text: response.content
+            if (propssonar.component.measures) {
+                            propssonar.component.measures.each{ measure ->
+                                def val
+                                if (measure.periods){
+                                    val = measure.periods[0].value
+                                }else {
+                                    val = measure.value
+                                }
+                                rtMaven.deployer.addProperty("sonar.quality.${measure.metric}", val)
+                            }
+                        }
+
+                        //增加sonar扫描结果到artifactory
+                        rtMaven.deployer.addProperty("qulity.gate.sonarUrl", SONAR_HOST_URL + "/dashboard/index/" + SONAR_PROJECT_KEY)
+        }
+    }
+    
+    stage('jira') {}
+    
+    stage('unit test') {
+        junit (testResults: '**/surefire-reports/**/*Test.xml')
+        //def build = manager.build
+        def testDatas = manager.build.getAction(hudson.tasks.junit.TestResultAction.class)
+        
+        if (testDatas) {
+            result = testDatas.result
+            JTtotal = result.getTotalCount().toString()
+            JTfailed = result.getFailCount().toString()
+            JTpassed = result.getPassCount().toString()
+            JTskiped = result.getSkipCount().toString()
+            passRate = result.getPassCount()/result.getTotalCount()*100
+            passRate = passRate.toString()+"%"
+        } else {
+            JTtotal = '0'
+            JTfailed = '0'
+            JTpassed = '0'
+            JTskiped = '0'
+            passRate = '0'
+        }
+        print("Total unit test case Number: " + JTtotal)
+        print("Pass unit test case Number: "+ JTpassed)
+        rtMaven.deployer.addProperty("unittest.summary.total_number",JTtotal)
+        rtMaven.deployer.addProperty("unittest.summary.pass_number",JTpassed)
+        rtMaven.deployer.addProperty("unittest.summary.pass_rate",passRate)
+        
+        
+    }
+    stage('xray') {
+        
+    }
+    
+    stage('deploy to test') {
+        buildInfo.env.capture = true
+        rtMaven.deployer.deployArtifacts buildInfo
+        artiServer.publishBuildInfo buildInfo
+    }
+    
+    stage("interface test") {
+        def yapiUrl = 'http://192.168.250.9:3000/api/open/run_auto_test?id=15&token=be847ec7c38857b44ca34bd016cf33913a10273f966e67ebd9cadf5fe05edea5&mode=json&email=false&download=false'
+        def response = httpRequest consoleLogResponseBody: true,contentType: 'APPLICATION_JSON', ignoreSslErrors: true,url: yapiUrl
+        def interfaceTestResult = readJSON text: response.content
+        print(interfaceTestResult.message.len)
+        print(interfaceTestResult.message.successNum)
+    }
+    stage('deploy stage') {
+        
+    }
+}
