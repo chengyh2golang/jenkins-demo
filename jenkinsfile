@@ -15,9 +15,6 @@ node() {
         git 'https://github.com/chengyh2golang/Guestbook-microservices-k8s'
     }
     
-    stage('sonarqube') {
-        
-    }
     
     stage('maven build') {
         rtMaven.resolver releaseRepo: 'maven-remote-virtual', snapshotRepo: 'maven-remote-virtual', server: artiServer
